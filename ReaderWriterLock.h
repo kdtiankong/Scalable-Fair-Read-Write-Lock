@@ -1,13 +1,12 @@
 //
-// Created by Quent on 15.05.2020.
+// Created by mguzek on 15.05.2020.
 //
 
 #ifndef SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H
 #define SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H
 
 #include <atomic>
-//#include <threads.h>
-#include <memory>
+#include <threads.h>
 #include <unordered_map>
 #include <cstdint>
 
@@ -19,9 +18,20 @@ class ReaderWriterLock {
         std::atomic<Node*> next;
         bool waitForNext;               //field only for readers
 
-        Node() {
+        Node() : waitForNext{false} {
             next.store(nullptr);
         }
+    };
+
+public:
+    class MyUniquePtr {
+        Node* ptr;
+    public:
+        MyUniquePtr() { ptr = nullptr; }
+        explicit MyUniquePtr(Node* addr) : ptr{addr} { }
+        MyUniquePtr& operator=(MyUniquePtr&& other) noexcept { ptr = std::exchange(other.ptr, nullptr); return *this; }
+        Node* get() const { return ptr; }
+        ~MyUniquePtr() { delete ptr; }
     };
 
     class ReaderLock {
@@ -34,13 +44,13 @@ class ReaderWriterLock {
 
         void lock() {
             enclosingObject->readers_count.fetch_add(1);
+            if(myNode.count(enclosingObject) == 0) {
+                myNode[enclosingObject] = std::move(MyUniquePtr{new Node{}});
+            }
             if(enclosingObject->tail.load() == nullptr) {
                 return;
             }
 
-            if(myNode.count(enclosingObject) == 0) {
-                myNode[enclosingObject] = std::make_unique<Node>();
-            }
             Node* node = myNode[enclosingObject].get();
             node->type.store(Node::LockType::READER);
 
@@ -52,7 +62,9 @@ class ReaderWriterLock {
 
             node->locked.store(true);
             pred->next.store(node);
-            while(node->locked.load()); //sort of unfortunate chain of loops for chain of READERS
+            while(node->locked.load()) { //sort of unfortunate chain of loops for chain of READERS
+                thrd_yield();
+            }
             enclosingObject->readers_count.fetch_add(1);
 
             node->waitForNext = true;
@@ -62,7 +74,9 @@ class ReaderWriterLock {
                     return;
                 }
                 else {
-                    while(node->next.load() == nullptr);
+                    while(node->next.load() == nullptr) {
+                        thrd_yield();
+                    }
                 }
             }
 
@@ -77,7 +91,9 @@ class ReaderWriterLock {
             Node* node = myNode[enclosingObject].get();
 
             if(node->waitForNext) {
-                while(node->next.load() == nullptr);
+                while(node->next.load() == nullptr) {
+                    thrd_yield();
+                }
                 node->next.load()->locked.store(false);
             }
 
@@ -95,7 +111,7 @@ class ReaderWriterLock {
 
         void lock() {
             if(myNode.count(enclosingObject) == 0) {
-                myNode[enclosingObject] = std::make_unique<Node>();
+                myNode[enclosingObject] = std::move(MyUniquePtr{new Node{}});
             }
             Node* node = myNode[enclosingObject].get();
             node->type.store(Node::LockType::WRITER);
@@ -104,12 +120,16 @@ class ReaderWriterLock {
             if(pred != nullptr) {
                 node->locked.store(true);
                 pred->next.store(node);
-                while(node->locked.load());
+                while(node->locked.load()) {
+                    thrd_yield();
+                }
                 if(pred->type.load() == Node::LockType::WRITER) {
                     return;
                 }
             }
-            while(enclosingObject->readers_count.load() > 0);
+            while(enclosingObject->readers_count.load() > 0) {
+                thrd_yield();
+            }
         }
 
         void unlock() {
@@ -118,7 +138,9 @@ class ReaderWriterLock {
                 if(enclosingObject->tail.compare_exchange_strong(node, nullptr)) {
                     return;
                 }
-                while(node->next.load() == nullptr);
+                while(node->next.load() == nullptr) {
+                    thrd_yield();
+                }
             }
 
             node->next.load()->locked.store(false);
@@ -128,7 +150,7 @@ class ReaderWriterLock {
 
     std::atomic<Node*> tail;
     std::atomic<uint64_t> readers_count; //TODO: change to SNZI
-    static thread_local std::unordered_map<ReaderWriterLock*, std::unique_ptr<Node>> myNode;
+    static thread_local std::unordered_map<ReaderWriterLock*, MyUniquePtr> myNode;
     ReaderLock reader_Lock;
     WriterLock writer_Lock;
 
