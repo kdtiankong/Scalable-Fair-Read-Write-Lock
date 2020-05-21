@@ -2,156 +2,48 @@
 // Created by mguzek on 15.05.2020.
 //
 
-#ifndef SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H
-#define SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H
+#include <iostream>
+#include <string>
+#include "librace.h"
+#include "ReaderWriterLock.h"
 
-#include <atomic>
-#include <threads.h>
-#include <cstdint>
+int sharedVariable = 5;
 
-class ReaderWriterLock {
-public:
-    struct Node {
-        enum LockType { READER, WRITER };
-        std::atomic<LockType> type;
-        std::atomic<bool> locked;
-        std::atomic<Node*> next;
-        bool waitForNext;               //field only for readers
+void func(ReaderWriterLock* rwlock)
+{
+    //ReaderWriterLock* rwlock = args->rwlock;
+    //const unsigned threadID = args->threadInd;
+    ReaderWriterLock::Node myNode{};// = new ReaderWriterLock::Node{};
 
-        Node() : waitForNext{false} {
-            next.store(nullptr);
-            locked.store(false);		//just to avoid CDSChecker's warnings regarding uninitialized atomics
-            type.store(LockType::READER);	//same as above
-        }
-    };
+    //std::cout << "Begin function for thread = " << threadID << "\n";
+    for(int i = 0 ; i < 5 ; ++i) {
+        //std::string toprint = "### [Thread " + std::to_string(threadID) + "] i = " + std::to_string(i) + "\n";
+        //std::string pprogress = "### [Thread " + std::to_string(threadID) + "] modified sharedVariable and is about to leave CS\n";
+        //std::cout<<toprint;
 
-    class ReaderLock {
-        ReaderWriterLock* const enclosingObject;
+        rwlock->readerLock().lock(&myNode);
+        int tmp = load_32(&sharedVariable);
+        rwlock->readerLock().unlock(&myNode);
 
-    public:
-        explicit ReaderLock(ReaderWriterLock* owner) : enclosingObject{owner} {
-
-        }
-
-        void lock(Node* myNode) {
-            enclosingObject->readers_count.fetch_add(1);
-            if(enclosingObject->tail.load() == nullptr) {
-                return;
-            }
-
-            myNode->type.store(Node::LockType::READER);
-            myNode->locked.store(false);
-            myNode->next.store(nullptr);
-
-            Node* pred = enclosingObject->tail.exchange(myNode);
-            Node* copyForCAS = myNode;
-            if(pred == nullptr && enclosingObject->tail.compare_exchange_strong(copyForCAS, nullptr)) {
-                return;
-            }
-
-            if(pred != nullptr) {
-                enclosingObject->readers_count.fetch_sub(1);
-                myNode->locked.store(true);
-                pred->next.store(myNode);
-                while(myNode->locked.load()) { //sort of unfortunate chain of loops for chain of READERS
-                    thrd_yield();
-                }
-                enclosingObject->readers_count.fetch_add(1);
-            }
-
-            if(myNode->next.load() == nullptr) {
-                Node* copyForCAS = myNode;
-                if(enclosingObject->tail.load() == nullptr || enclosingObject->tail.compare_exchange_strong(copyForCAS, nullptr)) {
-                    return;
-                }
-                while(myNode->next.load() == nullptr) {
-                    thrd_yield();
-                }
-            }
-
-            myNode->waitForNext = true;
-            if(myNode->next.load()->type.load() == Node::LockType::READER) {
-                myNode->next.load()->locked.store(false);
-                myNode->waitForNext = false;
-            }
-        }
-
-        void unlock(Node* myNode) {
-            enclosingObject->readers_count.fetch_sub(1);
-
-            if(myNode->waitForNext) {
-                while(myNode->next.load() == nullptr) {
-                    thrd_yield();
-                }
-                myNode->next.load()->locked.store(false);
-            }
-            myNode->next.store(nullptr);
-            myNode->waitForNext = false;
-        }
-    };
-
-    class WriterLock {
-        ReaderWriterLock* const enclosingObject;
-
-    public:
-        explicit WriterLock(ReaderWriterLock* owner) : enclosingObject{owner} {
-
-        }
-
-        void lock(Node* myNode) {
-            myNode->locked.store(false);
-            myNode->next.store(nullptr);
-            myNode->type.store(Node::LockType::WRITER);
-
-            Node* pred = enclosingObject->tail.exchange(myNode);
-
-            if(pred != nullptr) {
-                myNode->locked.store(true);
-                pred->next.store(myNode);
-                while(myNode->locked.load()) {
-                    thrd_yield();
-                }
-            }
-
-            while(enclosingObject->readers_count.load() > 0) {
-                thrd_yield();
-            }
-        }
-
-        void unlock(Node* myNode) {
-            if(myNode->next.load() == nullptr) {
-                Node* copyForCAS = myNode;
-                if(enclosingObject->tail.compare_exchange_strong(copyForCAS, nullptr)) {
-                    return;
-                }
-
-                while(myNode->next.load() == nullptr) {
-                    thrd_yield();
-                }
-            }
-
-            myNode->next.load()->locked.store(false);
-        }
-    };
-
-    std::atomic<Node*> tail;
-    std::atomic<uint64_t> readers_count; //TODO: change to SNZI
-    ReaderLock reader_Lock;
-    WriterLock writer_Lock;
-
-public:
-    ReaderWriterLock() : reader_Lock{this}, writer_Lock{this} {
-        tail.store(nullptr);
-        readers_count.store(0);
+        rwlock->writerLock().lock(&myNode);
+        store_32(&sharedVariable, 1);
+        //std::cout << pprogress;
+        rwlock->writerLock().unlock(&myNode);
     }
+    //std::cout << "End function for thread = " << threadID << "\n";
+    //delete myNode;
+}
 
-    ReaderLock& readerLock() {
-        return reader_Lock;
-    }
+int user_main(int, char**) {
+    ReaderWriterLock rwlock{};
 
-    WriterLock& writerLock() {
-        return writer_Lock;
-    }
-};
+    thrd_t thread1, thread2, thread3;
 
-#endif //SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H
+    thrd_create(&thread1, (thrd_start_t)func, &rwlock);
+    thrd_create(&thread2, (thrd_start_t)func, &rwlock);
+    thrd_create(&thread3, (thrd_start_t)func, &rwlock);
+
+    thrd_join(thread1);
+    thrd_join(thread2);
+    thrd_join(thread3);
+}
