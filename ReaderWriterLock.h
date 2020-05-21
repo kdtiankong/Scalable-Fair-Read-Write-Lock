@@ -6,11 +6,12 @@
 #define SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H
 
 #include <atomic>
-//#include <threads.h>
-#include <unordered_map>
+#include <threads.h>
+#include <string>
 #include <cstdint>
 
 class ReaderWriterLock {
+public:
     struct Node {
         enum LockType { READER, WRITER };
         std::atomic<LockType> type;
@@ -22,11 +23,9 @@ class ReaderWriterLock {
             next.store(nullptr);
         }
     };
-
-public:
+    /*
     class MyUniquePtr {
         Node* ptr;
-
     public:
         MyUniquePtr() { ptr = nullptr; }
         explicit MyUniquePtr(Node* addr) : ptr{addr} { }
@@ -34,6 +33,7 @@ public:
         Node* get() const { return ptr; }
         ~MyUniquePtr() { delete ptr; }
     };
+     */
 
     class ReaderLock {
         ReaderWriterLock* const enclosingObject;
@@ -43,66 +43,77 @@ public:
 
         }
 
-        void lock() {
+        void lock(const unsigned threadID, Node* myNode) {
+            std::string toprintent = "\tThread " + std::to_string(threadID) + " enters readers.lock()\n";
+            std::string toprintext = "\tThread " + std::to_string(threadID) + " exits readers.lock()\n";
+            std::cerr << toprintent;
+
             enclosingObject->readers_count.fetch_add(1);
-            if(myNode.count(enclosingObject) == 0) {
-                std::cout << "Should be executed once per thread\n";
-                myNode[enclosingObject] = std::move(MyUniquePtr{new Node{}});
-            }
             if(enclosingObject->tail.load() == nullptr) {
                 return;
             }
-/*
-            Node* node = myNode[enclosingObject].get();
-            node->type.store(Node::LockType::READER);
 
-            Node* pred = enclosingObject->tail.exchange(node);
-            if(pred == nullptr) {
+            myNode->type.store(Node::LockType::READER);
+            Node* pred = enclosingObject->tail.exchange(myNode);
+            if(pred == nullptr && enclosingObject->tail.compare_exchange_strong(myNode, nullptr)) {
                 return;
             }
-            enclosingObject->readers_count.fetch_sub(1);
 
-            node->locked.store(true);
-            pred->next.store(node);
-            while(node->locked.load()) { //sort of unfortunate chain of loops for chain of READERS
-                thrd_yield();
-            }
-            enclosingObject->readers_count.fetch_add(1);
-
-            node->waitForNext = true;
-            if(node->next.load() == nullptr) {
-                if(enclosingObject->tail.compare_exchange_strong(node, nullptr)) {
-                    node->waitForNext = false;
-                    return;
-                }
-                else {
-                    while(node->next.load() == nullptr) {
-                        thrd_yield();
-                    }
-                }
-            }
-
-            if(node->next.load()->type.load() == Node::LockType::READER) {
-                node->next.load()->locked.store(false);
-                node->waitForNext = false;
-            }
-*/
-        }
-
-        void unlock() {
-            enclosingObject->readers_count.fetch_sub(1);
-/*
-            Node* node = myNode[enclosingObject].get();
-
-            if(node->waitForNext) {
-                while(node->next.load() == nullptr) {
+            if(pred != nullptr) {
+                enclosingObject->readers_count.fetch_sub(1);
+                myNode->locked.store(true);
+                pred->next.store(myNode);
+                std::string loop1b = "\t\t[Thread " + std::to_string(threadID) + "] #1 loop begin\n";
+                std::string loop1e = "\t\t[Thread " + std::to_string(threadID) + "] #1 loop end\n";
+                std::cerr << loop1b;
+                while(myNode->locked.load()) { //sort of unfortunate chain of loops for chain of READERS
                     thrd_yield();
                 }
-                node->next.load()->locked.store(false);
+                std::cerr << loop1e;
+                enclosingObject->readers_count.fetch_add(1);
             }
 
-            node->next.store(nullptr);
-*/
+            if(myNode->next.load() == nullptr) {
+                if(enclosingObject->tail.load() == nullptr || enclosingObject->tail.compare_exchange_strong(myNode, nullptr)) {
+                    return;
+                }
+                std::string loop2b = "\t\t[Thread " + std::to_string(threadID) + "] #2 loop begin\n";
+                std::string loop2e = "\t\t[Thread " + std::to_string(threadID) + "] #2 loop end\n";
+                std::cerr << loop2b;
+                while(myNode->next.load() == nullptr) {
+                    thrd_yield();
+                }
+                std::cerr << loop2e;
+            }
+
+            myNode->waitForNext = true;
+            if(myNode->next.load()->type.load() == Node::LockType::READER) {
+                myNode->next.load()->locked.store(false);
+                myNode->waitForNext = false;
+            }
+            std::cerr << toprintext;
+        }
+
+        void unlock(const unsigned threadID, Node* myNode) {
+            std::string toprintent = "Thread " + std::to_string(threadID) + " enters readers.unlock()\n";
+            std::string toprintext = "Thread " + std::to_string(threadID) + " exits readers.unlock()\n";
+            std::cerr << toprintent;
+
+            enclosingObject->readers_count.fetch_sub(1);
+
+            if(myNode->waitForNext) {
+                std::string loop3b = "\t\t[Thread " + std::to_string(threadID) + "] #3 loop begin\n";
+                std::string loop3e = "\t\t[Thread " + std::to_string(threadID) + "] #3 loop end\n";
+                std::cerr << loop3b;
+                while(myNode->next.load() == nullptr) {
+                    thrd_yield();
+                }
+                std::cerr << loop3e;
+                myNode->next.load()->locked.store(false);
+            }
+            myNode->next.store(nullptr);
+            myNode->waitForNext = false;
+            std::cerr << toprintext;
         }
     };
 
@@ -114,231 +125,102 @@ public:
 
         }
 
-        void lock() {
-            if(myNode.count(enclosingObject) == 0) {
-                myNode[enclosingObject] = std::move(MyUniquePtr{new Node{}});
-            }
-            Node* node = myNode[enclosingObject].get();
-            node->type.store(Node::LockType::WRITER);
+        void lock(const unsigned threadID, Node* myNode) {
+            std::string toprintent = "Thread " + std::to_string(threadID) + " enters writers.lock()\n";
+            std::string toprintext = "Thread " + std::to_string(threadID) + " exits writers.lock()\n";
+            std::string toprintext2 = "Thread " + std::to_string(threadID) + " exits writers.lock() in 174\n";
+            std::cerr << toprintent;
 
-            Node* pred = enclosingObject->tail.exchange(node);
+            myNode->type.store(Node::LockType::WRITER);
+            Node* pred = enclosingObject->tail.exchange(myNode);
+            std::string addr233 = "\t\t[Line 149][Thread " + std::to_string(threadID) + "] pred ="
+                                  + std::to_string(reinterpret_cast<unsigned long>(pred)) + "\n";
+            std::string addr3 = "\t\t[Line 149][Thread " + std::to_string(threadID) + "] tail ="
+                                + std::to_string(reinterpret_cast<unsigned long>(enclosingObject->tail.load())) + "\n";
+            std::string addr4 = "\t\t[Line 150][Thread " + std::to_string(threadID) + "] myNode ="
+                                + std::to_string(reinterpret_cast<unsigned long>(myNode)) + "\n";
+            std::cerr << addr233;
+            std::cerr << addr3;
+            std::cerr << addr4;
+
             if(pred != nullptr) {
-                node->locked.store(true);
-                pred->next.store(node);
-                while(node->locked.load()) {
-                    //thrd_yield();
+                myNode->locked.store(true);
+                std::string pprogress = "\t\t[Thread " + std::to_string(threadID) + "] stored its address in pred->next\n";
+                pred->next.store(myNode);
+                std::cerr << pprogress;
+                std::string pprogress2 = "\t\t[Thread " + std::to_string(threadID) + "] pred->next.load() = "
+                                         + std::to_string(reinterpret_cast<unsigned long>(pred->next.load())) +"\n";
+                std::cerr << pprogress2;
+                std::string loop4b = "\t\t[Thread " + std::to_string(threadID) + "] #4 loop begin\n";
+                std::string loop4e = "\t\t[Thread " + std::to_string(threadID) + "] #4 loop end\n";
+                std::string addr = "\t\t[Line 171][Thread " + std::to_string(threadID) + "] node address=" + std::to_string(reinterpret_cast<unsigned long>(myNode)) + "\n";
+                std::string addr2 = "\t\t[Line 172][Thread " + std::to_string(threadID) + "] pred address=" + std::to_string(reinterpret_cast<unsigned long>(pred)) + "\n";
+                std::cerr << addr;
+                std::cerr << addr2;
+                std::cerr << loop4b;
+                while(myNode->locked.load()) {
+                    thrd_yield();
+                    std::cerr << "\t\t\tIn loop4\n";
                 }
+                std::cerr << loop4e;
                 if(pred->type.load() == Node::LockType::WRITER) {
+                    std::cerr << toprintext2;
                     return;
                 }
             }
+            std::string loop5b = "\t\t[Thread " + std::to_string(threadID) + "] #5 loop begin\n";
+            std::string loop5e = "\t\t[Thread " + std::to_string(threadID) + "] #5 loop end\n";
+            std::cerr << loop5b;
             while(enclosingObject->readers_count.load() > 0) {
-                //thrd_yield();
-            }
-        }
-
-        void unlock() {
-            Node* node = myNode[enclosingObject].get();
-            if(node->next.load() == nullptr) {
-                if(enclosingObject->tail.compare_exchange_strong(node, nullptr)) {
-                    return;
-                }
-                while(node->next.load() == nullptr) {
-                    //thrd_yield();
-                }
-            }
-
-            node->next.load()->locked.store(false);
-            node->next.store(nullptr);
-        }
-    };
-
-    std::atomic<Node*> tail;
-    std::atomic<uint64_t> readers_count; //TODO: change to SNZI
-    static thread_local std::unordered_map<ReaderWriterLock*, MyUniquePtr> myNode;
-    ReaderLock reader_Lock;
-    WriterLock writer_Lock;
-
-public:
-    ReaderWriterLock() : reader_Lock{this}, writer_Lock{this} {
-        tail.store(nullptr);
-        readers_count.store(0);
-    }
-
-    ReaderLock& readerLock() {
-        return reader_Lock;
-    }
-
-    WriterLock& writerLock() {
-        return writer_Lock;
-    }
-};
-
-#endif //SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H//
-// Created by mguzek on 15.05.2020.
-//
-
-#ifndef SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H
-#define SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H
-
-#include <atomic>
-//#include <threads.h>
-#include <unordered_map>
-#include <cstdint>
-
-class ReaderWriterLock {
-    struct Node {
-        enum LockType { READER, WRITER };
-        std::atomic<LockType> type;
-        std::atomic<bool> locked;
-        std::atomic<Node*> next;
-        bool waitForNext;               //field only for readers
-
-        Node() : waitForNext{false} {
-            next.store(nullptr);
-        }
-    };
-
-public:
-    class MyUniquePtr {
-        Node* ptr;
-        template<class T, class U = T>
-        T exchange(T& obj, U&& new_value)
-        {
-            T old_value = std::move(obj);
-            obj = std::forward<U>(new_value);
-            return old_value;
-        }
-
-    public:
-        MyUniquePtr() { ptr = nullptr; }
-        explicit MyUniquePtr(Node* addr) : ptr{addr} { }
-        MyUniquePtr& operator=(MyUniquePtr&& other) noexcept { ptr = exchange(other.ptr, nullptr); return *this; }
-        Node* get() const { return ptr; }
-        ~MyUniquePtr() { delete ptr; }
-    };
-
-    class ReaderLock {
-        ReaderWriterLock* const enclosingObject;
-
-    public:
-        explicit ReaderLock(ReaderWriterLock* owner) : enclosingObject{owner} {
-
-        }
-
-        void lock() {
-            enclosingObject->readers_count.fetch_add(1);
-            if(myNode.count(enclosingObject) == 0) {
-                std::cout << "Should be executed once per thread\n";
-                myNode[enclosingObject] = std::move(MyUniquePtr{new Node{}});
-            }
-            if(enclosingObject->tail.load() == nullptr) {
-                return;
-            }
-/*
-            Node* node = myNode[enclosingObject].get();
-            node->type.store(Node::LockType::READER);
-
-            Node* pred = enclosingObject->tail.exchange(node);
-            if(pred == nullptr) {
-                return;
-            }
-            enclosingObject->readers_count.fetch_sub(1);
-
-            node->locked.store(true);
-            pred->next.store(node);
-            while(node->locked.load()) { //sort of unfortunate chain of loops for chain of READERS
                 thrd_yield();
             }
-            enclosingObject->readers_count.fetch_add(1);
-
-            node->waitForNext = true;
-            if(node->next.load() == nullptr) {
-                if(enclosingObject->tail.compare_exchange_strong(node, nullptr)) {
-                    node->waitForNext = false;
-                    return;
-                }
-                else {
-                    while(node->next.load() == nullptr) {
-                        thrd_yield();
-                    }
-                }
-            }
-
-            if(node->next.load()->type.load() == Node::LockType::READER) {
-                node->next.load()->locked.store(false);
-                node->waitForNext = false;
-            }
-*/
+            std::cerr << loop5e;
+            std::cerr << toprintext;
         }
 
-        void unlock() {
-            enclosingObject->readers_count.fetch_sub(1);
-/*
-            Node* node = myNode[enclosingObject].get();
+        void unlock(const unsigned threadID, Node* myNode) {
 
-            if(node->waitForNext) {
-                while(node->next.load() == nullptr) {
+            std::string toprintent = "Thread " + std::to_string(threadID) + " enters writers.unlock()\n";
+            std::string toprintext = "Thread " + std::to_string(threadID) + " exits writers.unlock()\n";
+            std::string toprintext2 = "Thread " + std::to_string(threadID) + " exits writers.ulock() in 214\n";
+            std::cerr << toprintent;
+
+            std::string addr = "\t\t[Line 199][Thread " + std::to_string(threadID) + "] node address=" + std::to_string(reinterpret_cast<unsigned long>(myNode)) + "\n";
+            std::cerr << addr;
+
+            if(myNode->next.load() == nullptr) {
+                std::string addr23 = "\t\t[Line 203][Thread " + std::to_string(threadID) + "] node address just after if entrance=" + 							std::to_string(reinterpret_cast<unsigned long>(myNode)) + "\n";
+                std::cerr << addr23;
+
+                if(enclosingObject->tail.compare_exchange_strong(myNode, nullptr)) {
+                    std::cerr << toprintext2;
+                    return;
+                }
+
+                std::string loop6b = "\t\t[Thread " + std::to_string(threadID) + "] #6 loop begin\n";
+                std::string loop6e = "\t\t[Thread " + std::to_string(threadID) + "] #6 loop end\n";
+                std::cerr << loop6b;
+                std::string addr22 = "\t\t[Line 207][Thread " + std::to_string(threadID) + "] node address just before loop6 entrance=" + 						std::to_string(reinterpret_cast<unsigned long>(myNode)) + "\n";
+                std::cerr << addr22;
+                while(myNode->next.load() == nullptr) {
                     thrd_yield();
+                    std::cerr << "\t\t\tIn loop6\n";
+                    std::string addr34 = "\t\t[Loop 6][Thread " + std::to_string(threadID) + "] node address=" + std::to_string(reinterpret_cast<unsigned long>(myNode)) + "\n";
+                    std::string addr35 = "\t\t[Loop 6][Thread " + std::to_string(threadID) + "] node->next.load()="
+                                         + std::to_string(reinterpret_cast<unsigned long>(myNode->next.load())) + "\n";
+                    std::cerr << addr34;
+                    std::cerr << addr35;
                 }
-                node->next.load()->locked.store(false);
+                std::cerr << loop6e;
             }
 
-            node->next.store(nullptr);
-*/
-        }
-    };
-
-    class WriterLock {
-        ReaderWriterLock* const enclosingObject;
-
-    public:
-        explicit WriterLock(ReaderWriterLock* owner) : enclosingObject{owner} {
-
-        }
-
-        void lock() {
-            if(myNode.count(enclosingObject) == 0) {
-                myNode[enclosingObject] = std::move(MyUniquePtr{new Node{}});
-            }
-            Node* node = myNode[enclosingObject].get();
-            node->type.store(Node::LockType::WRITER);
-
-            Node* pred = enclosingObject->tail.exchange(node);
-            if(pred != nullptr) {
-                node->locked.store(true);
-                pred->next.store(node);
-                while(node->locked.load()) {
-                    //thrd_yield();
-                }
-                if(pred->type.load() == Node::LockType::WRITER) {
-                    return;
-                }
-            }
-            while(enclosingObject->readers_count.load() > 0) {
-                //thrd_yield();
-            }
-        }
-
-        void unlock() {
-            Node* node = myNode[enclosingObject].get();
-            if(node->next.load() == nullptr) {
-                if(enclosingObject->tail.compare_exchange_strong(node, nullptr)) {
-                    return;
-                }
-                while(node->next.load() == nullptr) {
-                    //thrd_yield();
-                }
-            }
-
-            node->next.load()->locked.store(false);
-            node->next.store(nullptr);
+            myNode->next.load()->locked.store(false);
+            std::cerr << toprintext;
         }
     };
 
     std::atomic<Node*> tail;
     std::atomic<uint64_t> readers_count; //TODO: change to SNZI
-    static thread_local std::unordered_map<ReaderWriterLock*, MyUniquePtr> myNode;
     ReaderLock reader_Lock;
     WriterLock writer_Lock;
 
