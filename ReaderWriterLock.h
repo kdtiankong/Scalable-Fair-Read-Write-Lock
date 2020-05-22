@@ -6,13 +6,14 @@
 #define SCALABLE_FAIR_READER_WRITER_LOCK_READERWRITERLOCK_H
 
 #include <atomic>
-#include <threads.h>
+//#include <threads.h>
 #include <cstdint>
+#include "SNZI.h"
 
 class ReaderWriterLock {
 public:
     struct Node {
-        enum LockType { READER, WRITER };
+        enum class LockType { READER, WRITER };
         std::atomic<LockType> type;
         std::atomic<bool> locked;
         std::atomic<Node*> next;
@@ -20,8 +21,8 @@ public:
 
         Node() : waitForNext{false} {
             next.store(nullptr);
-            locked.store(false);		//just to avoid CDSChecker's warnings regarding uninitialized atomics
-            type.store(LockType::READER);	//same as above
+            //locked.store(false);		        //just to avoid CDSChecker's warnings regarding uninitialized atomics
+            //type.store(LockType::READER);	//same as above
         }
     };
 
@@ -33,15 +34,14 @@ public:
 
         }
 
-        void lock(Node* myNode) {
-            enclosingObject->readers_count.fetch_add(1);
+        void lock(const unsigned threadID, Node* myNode) {
+            //enclosingObject->readers_count.fetch_add(1);
+            enclosingObject->snzi.arrive(threadID);
             if(enclosingObject->tail.load() == nullptr) {
                 return;
             }
 
             myNode->type.store(Node::LockType::READER);
-            myNode->locked.store(false);
-            myNode->next.store(nullptr);
 
             Node* pred = enclosingObject->tail.exchange(myNode);
             Node* copyForCAS = myNode;
@@ -50,22 +50,24 @@ public:
             }
 
             if(pred != nullptr) {
-                enclosingObject->readers_count.fetch_sub(1);
+                //enclosingObject->readers_count.fetch_sub(1);
+                enclosingObject->snzi.depart(threadID);
                 myNode->locked.store(true);
                 pred->next.store(myNode);
                 while(myNode->locked.load()) { //sort of unfortunate chain of loops for chain of READERS
-                    thrd_yield();
+                    //thrd_yield();
                 }
-                enclosingObject->readers_count.fetch_add(1);
+                //enclosingObject->readers_count.fetch_add(1);
+                enclosingObject->snzi.arrive(threadID);
             }
 
             if(myNode->next.load() == nullptr) {
-                Node* copyForCAS = myNode;
+                copyForCAS = myNode;
                 if(enclosingObject->tail.load() == nullptr || enclosingObject->tail.compare_exchange_strong(copyForCAS, nullptr)) {
                     return;
                 }
                 while(myNode->next.load() == nullptr) {
-                    thrd_yield();
+                    //thrd_yield();
                 }
             }
 
@@ -76,12 +78,13 @@ public:
             }
         }
 
-        void unlock(Node* myNode) {
-            enclosingObject->readers_count.fetch_sub(1);
+        void unlock(const unsigned threadID, Node* myNode) {
+            //enclosingObject->readers_count.fetch_sub(1);
+            enclosingObject->snzi.depart(threadID);
 
             if(myNode->waitForNext) {
                 while(myNode->next.load() == nullptr) {
-                    thrd_yield();
+                    //thrd_yield();
                 }
                 myNode->next.load()->locked.store(false);
             }
@@ -98,9 +101,7 @@ public:
 
         }
 
-        void lock(Node* myNode) {
-            myNode->locked.store(false);
-            myNode->next.store(nullptr);
+        void lock(const unsigned threadID, Node* myNode) {
             myNode->type.store(Node::LockType::WRITER);
 
             Node* pred = enclosingObject->tail.exchange(myNode);
@@ -109,16 +110,17 @@ public:
                 myNode->locked.store(true);
                 pred->next.store(myNode);
                 while(myNode->locked.load()) {
-                    thrd_yield();
+                    //thrd_yield();
                 }
             }
 
-            while(enclosingObject->readers_count.load() > 0) {
-                thrd_yield();
+            //while(enclosingObject->readers_count.load() > 0) {
+            while(enclosingObject->snzi.query()) {
+            //thrd_yield();
             }
         }
 
-        void unlock(Node* myNode) {
+        void unlock(const unsigned threadID, Node* myNode) {
             if(myNode->next.load() == nullptr) {
                 Node* copyForCAS = myNode;
                 if(enclosingObject->tail.compare_exchange_strong(copyForCAS, nullptr)) {
@@ -126,23 +128,26 @@ public:
                 }
 
                 while(myNode->next.load() == nullptr) {
-                    thrd_yield();
+                    //thrd_yield();
                 }
             }
 
             myNode->next.load()->locked.store(false);
+            myNode->next.store(nullptr);
         }
     };
 
+private:
     std::atomic<Node*> tail;
-    std::atomic<uint64_t> readers_count; //TODO: change to SNZI
+    //std::atomic<uint64_t> readers_count; //TODO: change to SNZI
+    SNZI snzi;
     ReaderLock reader_Lock;
     WriterLock writer_Lock;
 
 public:
-    ReaderWriterLock() : reader_Lock{this}, writer_Lock{this} {
+    ReaderWriterLock() : snzi{5}, reader_Lock{this}, writer_Lock{this} {
         tail.store(nullptr);
-        readers_count.store(0);
+        //readers_count.store(0);
     }
 
     ReaderLock& readerLock() {
