@@ -8,10 +8,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cmath>
-//#include "model-assert.h"
+#include "model-assert.h"
 
 class SNZI {
-public: //TODO temporary
     struct Node {
         Node* const parent;
                                     //(bit ranges from left to right)
@@ -20,8 +19,8 @@ public: //TODO temporary
         std::atomic<uint64_t> I;    //only for the root node: 63 bits for version number, 1 bit for indicator
 
         Node(Node* parent) : parent{parent} {
-            X.store(0);
-            I.store(0);
+            X.store(0, std::memory_order_release);
+            I.store(0, std::memory_order_release);
         }
 
         //----------------------------------------------------------------------------------------------------------
@@ -33,56 +32,35 @@ public: //TODO temporary
             return (value & mask) >> fromBit;
         }
 
-        static uint64_t isolateOriginalBits(const uint64_t value, unsigned noBits, unsigned fromBit) {
-            if(fromBit >= 64) return 0;
-
-            uint64_t mask = ((uint64_t(1) << noBits) - uint64_t(1)) << fromBit;
-            return value & mask;
+        static void setX(uint64_t& x, uint32_t counter, uint32_t version, uint8_t flag) {
+            version &= ~(1u << 31u);            //clearing 32th bit of 31-bit value
+            uint64_t counter64 = counter;
+            counter64 <<= 32u;
+            uint64_t version64 = version;
+            version64 <<= 1u;
+            x = (counter64 | version64 | flag);
         }
 
-        static void setBitGroup(uint64_t& value, unsigned fromBit, const uint64_t bitMask, unsigned noBitsInMask) {
-            if(fromBit >= 64) return;
-
-            uint64_t mask = (uint64_t(1) << noBitsInMask) - uint64_t(1);
-            uint64_t lastXBits = bitMask & mask;
-
-            uint64_t firstPart = isolateOriginalBits(value, 64-(fromBit+noBitsInMask), fromBit+noBitsInMask);
-            uint64_t middlePart = (lastXBits << fromBit);
-            uint64_t lastPart = isolateOriginalBits(value, fromBit, 0);
-
-            value = firstPart + middlePart + lastPart;
+        static void setI(uint64_t& i, uint64_t version, uint8_t flag) {
+            version <<= 1u;
+            i = (version | flag);
         }
 
-        static uint64_t extractCounterFromX(const uint64_t x) {
+        static uint32_t extractCounterFromX(const uint64_t x) {
             return isolateBits(x, 32, 32);
         }
-        static uint64_t extractVersionFromX(const uint64_t x) {
+        static uint32_t extractVersionFromX(const uint64_t x) {
             return isolateBits(x, 31, 1);
         }
-        static uint64_t extractFlagFromX(const uint64_t x) {
+        static uint8_t extractFlagFromX(const uint64_t x) {
             return isolateBits(x, 1, 0);
-        }
-        static void setCounterInX(uint64_t& x, const uint64_t counter) {
-            setBitGroup(x, 32, counter, 32);
-        }
-        static void setVersionInX(uint64_t& x, const uint64_t version) {
-            setBitGroup(x, 1, version, 31);
-        }
-        static void setFlagInX(uint64_t& x, const uint64_t flag) {
-            setBitGroup(x, 0, flag, 1);
         }
 
         static uint64_t r_extractVersionFromI(const uint64_t i) {
             return isolateBits(i, 63, 1);
         }
-        static uint64_t r_extractFlagFromI(const uint64_t i) {
+        static uint8_t r_extractFlagFromI(const uint64_t i) {
             return isolateBits(i, 1, 0);
-        }
-        static void r_setVersionInI(uint64_t& i, const uint64_t version) {
-            setBitGroup(i, 1, version, 63);
-        }
-        static void r_setFlagInI(uint64_t& i, const uint64_t flag) {
-            setBitGroup(i, 0, flag, 1);
         }
         //----------------------------------------------------------------------------------------------------------
 
@@ -90,23 +68,22 @@ public: //TODO temporary
             bool succ = false;
             unsigned undoArr = 0;
             while(!succ) {
-                uint64_t x = X.load();
-                uint64_t x_c = extractCounterFromX(x);
-                if(x_c >= 1) {
+                uint64_t x = X.load(std::memory_order_acquire);
+                uint32_t x_c = extractCounterFromX(x);
+                uint8_t x_f = extractFlagFromX(x);
+                if(x_c >= 1 && !x_f) {
                     uint64_t new_x = 0;
-                    setCounterInX(new_x, x_c+1);
-                    setVersionInX(new_x, extractVersionFromX(x));
-                    uint64_t copy_of_x = x;
-                    if(X.compare_exchange_strong(copy_of_x, new_x)) {
+                    setX(new_x, x_c+1, extractVersionFromX(x), 0);
+                    uint64_t copy_of_x = x; //copying original value since CAS might modify it in case of a failure
+                    if(X.compare_exchange_strong(copy_of_x, new_x, std::memory_order_acq_rel, std::memory_order_relaxed)) {
                         succ = true;
                     }
                 }
-                if(x_c == 0) {
+                if(x_c == 0 && !x_f) {
                     uint64_t new_x = 0;
-                    setVersionInX(new_x, extractVersionFromX(x)+1);
-                    setFlagInX(new_x, 1);
+                    setX(new_x, 0, extractVersionFromX(x)+1, 1);
                     uint64_t copy_of_x = x;
-                    if(X.compare_exchange_strong(copy_of_x, new_x)) {
+                    if(X.compare_exchange_strong(copy_of_x, new_x, std::memory_order_acq_rel, std::memory_order_relaxed)) {
                         succ = true;
                         x = new_x;
                     }
@@ -114,10 +91,9 @@ public: //TODO temporary
                 if(extractFlagFromX(x)) {
                     parent->arrive();
                     uint64_t new_x = 0;
-                    setCounterInX(new_x, 1);
-                    setVersionInX(new_x, extractVersionFromX(x));
+                    setX(new_x, 1, extractVersionFromX(x), 0);
                     uint64_t copy_of_x = x;
-                    if(!X.compare_exchange_strong(copy_of_x, new_x)) {
+                    if(!X.compare_exchange_strong(copy_of_x, new_x, std::memory_order_acq_rel, std::memory_order_relaxed)) {
                         ++undoArr;
                     }
                 }
@@ -129,14 +105,13 @@ public: //TODO temporary
         }
 
         void hierarchicalNodeDepart() {
+            uint64_t x = X.load(std::memory_order_acquire);
             while(true) {
-                uint64_t x = X.load();
-                //MODEL_ASSERT(extractCounterFromX(x) >= 1);
-                uint64_t new_x = 0;
                 uint64_t x_c = extractCounterFromX(x);
-                setCounterInX(new_x, x_c-1);
-                setVersionInX(new_x, extractVersionFromX(x));
-                if(X.compare_exchange_strong(x, new_x)) {
+                MODEL_ASSERT(x_c >= 1);
+                uint64_t new_x = 0;
+                setX(new_x, x_c-1, extractVersionFromX(x), 0);
+                if(X.compare_exchange_strong(x, new_x, std::memory_order_acq_rel, std::memory_order_relaxed)) {
                     if(x_c == 1) {
                         parent->depart();
                     }
@@ -146,66 +121,52 @@ public: //TODO temporary
         }
 
         void rootNodeArrive() {
-            uint64_t x = X.load();
-            //std::cout << "A-BEFORE: " << std::bitset<64>(x) << "\n";
+            uint64_t x = X.load(std::memory_order_acquire);
             uint64_t new_x;
             do {
                 uint64_t x_c = extractCounterFromX(x);
                 if(x_c == 0) {
-                    setCounterInX(new_x, 1);
-                    setFlagInX(new_x, 1);
-                    setVersionInX(new_x, extractVersionFromX(x)+1);
+                    setX(new_x, 1, extractVersionFromX(x)+1, 1);
                 }
                 else {
                     new_x = x;
-                    setCounterInX(new_x, x_c+1);
+                    setX(new_x, x_c+1, extractVersionFromX(x), extractFlagFromX(x));
                 }
-            } while(!X.compare_exchange_strong(x, new_x));
-
-            //std::cout << "A-1AFTER: " << std::bitset<64>(X.load()) << "\n";
+            } while(!X.compare_exchange_strong(x, new_x, std::memory_order_acq_rel, std::memory_order_relaxed));
 
             if(extractFlagFromX(new_x)) {
-                uint64_t i = I.load();
+                uint64_t i = I.load(std::memory_order_acquire);
                 uint64_t new_i;
-                r_setFlagInI(new_i, 1);
                 do {
-                    r_setVersionInI(new_i, r_extractVersionFromI(i)+1);
-                } while(!I.compare_exchange_strong(i, new_i));
+                    setI(new_i, r_extractVersionFromI(i)+1, 1);
+                } while(!I.compare_exchange_strong(i, new_i, std::memory_order_acq_rel, std::memory_order_relaxed));
 
-                uint64_t new_x_withNoAnnounceBit = new_x;
-                setFlagInX(new_x_withNoAnnounceBit, 0);
-                X.compare_exchange_strong(new_x, new_x_withNoAnnounceBit);
+                uint64_t new_x_withNoAnnounceBit = new_x & ~(uint64_t(1));
+                X.compare_exchange_strong(new_x, new_x_withNoAnnounceBit, std::memory_order_acq_rel, std::memory_order_relaxed);
             }
-            //std::cout << "A-2AFTER: " << std::bitset<64>(X.load()) << "\n";
         }
 
         void rootNodeDepart() {
-            uint64_t x = X.load();
-            //std::cout << "D-BEFORE: " << std::bitset<64>(x) << "\n";
+            uint64_t x = X.load(std::memory_order_acquire);
             while(true) {
                 uint64_t x_c = extractCounterFromX(x);
-                //MODEL_ASSERT(x_c >= 1);
-                uint64_t x_v = extractCounterFromX(x);
+                MODEL_ASSERT(x_c >= 1);
+                uint64_t x_v = extractVersionFromX(x);
                 uint64_t new_x;
-                setCounterInX(new_x, x_c-1);
-                setFlagInX(new_x, 0);
-                setVersionInX(new_x, x_v);
-                if(X.compare_exchange_strong(x, new_x)) {
-                    //std::cout << "D- AFTER: " << std::bitset<64>(X.load()) << "\n";
+                setX(new_x, x_c-1, x_v, 0);
+                if(X.compare_exchange_strong(x, new_x, std::memory_order_acq_rel, std::memory_order_relaxed)) {
                     if(x_c >= 2) {
                         return;
                     }
 
-                    uint64_t i = I.load();
-                    if(extractVersionFromX(X.load()) != x_v) {
+                    uint64_t i = I.load(std::memory_order_acquire);
+                    if(extractVersionFromX(X.load(std::memory_order_acquire)) != x_v) {
                         return;
                     }
                     uint64_t new_i;
-                    r_setVersionInI(new_i, r_extractVersionFromI(i)+1);
-                    r_setFlagInI(new_i, 0);
-                    if(I.compare_exchange_strong(i, new_i)) {
-                        return;
-                    }
+                    setI(new_i, r_extractVersionFromI(i)+1, 0);
+                    I.compare_exchange_strong(i, new_i, std::memory_order_acq_rel, std::memory_order_relaxed);
+                    return;
                 }
             }
         }
@@ -250,21 +211,21 @@ public: //TODO temporary
     Node** leaves;
 
 public:
-    SNZI(int depth) :
-                        root{new Node(nullptr)},
-                        nodeCount{0},
-                        nodes{new Node*[static_cast<uint64_t>(std::pow(2, depth+1)-1)]},
-                        leafCount{0},
-                        leaves{new Node*[static_cast<uint64_t>(std::pow(2, depth))]} {
+    SNZI(unsigned depth) :
+            root{new Node(nullptr)},
+            nodeCount{0},
+            nodes{new Node*[static_cast<uint64_t>(std::pow(2, depth+1)-1)]},
+            leafCount{0},
+            leaves{new Node*[static_cast<uint64_t>(std::pow(2, depth))]} {
+        MODEL_ASSERT(depth >= 1);
         nodes[nodeCount++] = root;
         initializeTree(root, depth-1);
         initializeTree(root, depth-1);
-        /*
+
         auto calculatedNoOfNodes = static_cast<uint64_t>(std::pow(2, depth+1)-1);
         auto calculatedNoOfLeaves = std::pow(2, depth);
         MODEL_ASSERT(nodeCount == calculatedNoOfNodes);
         MODEL_ASSERT(leafCount == calculatedNoOfLeaves);
-         */
     }
 
     void arrive(unsigned leaf) {
@@ -276,7 +237,7 @@ public:
     }
 
     bool query() const {
-        return SNZI::Node::r_extractFlagFromI(root->I.load());
+        return SNZI::Node::r_extractFlagFromI(root->I.load(std::memory_order_acquire));
     }
 
     ~SNZI() {
