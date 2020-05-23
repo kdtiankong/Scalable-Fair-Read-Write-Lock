@@ -3,7 +3,7 @@
 //
 
 //TEST CASE 1: 3 threads with SNZI tree of depth 5
-//Run with: ./run.sh CS295/test3 -m 2 -y -x 1000
+//Run with: ./run.sh CS295/test1 -m 2 -y -x 1000
 
 #include <threads.h>
 #include "librace.h"
