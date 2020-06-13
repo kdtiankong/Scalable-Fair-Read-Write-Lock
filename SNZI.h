@@ -237,7 +237,7 @@ public:
     }
 
     bool query() const {
-        return SNZI::Node::r_extractFlagFromI(root->I.load(std::memory_order_acquire));
+        return SNZI::Node::r_extractFlagFromI(root->I.load(std::memory_order_seq_cst));
     }
 
     ~SNZI() {
